@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Submit with submit-request.sh.
+#PBS -j oe
+#PBS -k oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
+readonly SCRIPT_DIR="$PBS_O_WORKDIR"
+
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+k3_load_config "${K3_CONFIG:?K3_CONFIG is not set}"
+
+if [[ ${USE_SSH:-} != "1" ]]; then
+    k3_die "request job requires USE_SSH=1"
+fi
+readonly ROUTER_HOST="${ROUTER_HOST:?ROUTER_HOST is not set}"
+readonly REQUEST_SCRIPT="${REQUEST_SCRIPT:?REQUEST_SCRIPT is not set}"
+[[ -f "$REQUEST_SCRIPT" ]] \
+    || k3_die "request script not found: $REQUEST_SCRIPT"
+
+TUNNEL_PID=""
+cleanup() {
+    if [[ -n ${TUNNEL_PID:-} ]] &&
+       kill -0 "$TUNNEL_PID" 2>/dev/null; then
+        kill "$TUNNEL_PID" 2>/dev/null || true
+    fi
+    if [[ -n ${TUNNEL_PID:-} ]]; then
+        wait "$TUNNEL_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+
+echo "pbs_jobid=${PBS_JOBID:?PBS_JOBID is not set}"
+echo "client_host=$(hostname -s)"
+echo "router_host=$ROUTER_HOST"
+echo "request_script=$REQUEST_SCRIPT"
+
+ssh \
+    -N \
+    -T \
+    -o BatchMode=yes \
+    -o ConnectTimeout=15 \
+    -o ExitOnForwardFailure=yes \
+    -L 127.0.0.1:31000:127.0.0.1:31000 \
+    "$ROUTER_HOST" &
+TUNNEL_PID=$!
+
+tunnel_ready=0
+for _ in {1..30}; do
+    if curl \
+        --fail \
+        --silent \
+        --output /dev/null \
+        http://127.0.0.1:31000/readiness
+    then
+        tunnel_ready=1
+        break
+    fi
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+        wait "$TUNNEL_PID" 2>/dev/null || true
+        k3_die "SSH port forwarding exited before Router became reachable"
+    fi
+    sleep 1
+done
+(( tunnel_ready == 1 )) \
+    || k3_die "Router did not become reachable through SSH port forwarding"
+
+echo "forwarded_router_url=http://127.0.0.1:31000"
+bash "$REQUEST_SCRIPT"
+echo "K3_REQUEST_JOB_OK"

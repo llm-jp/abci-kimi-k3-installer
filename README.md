@@ -89,31 +89,27 @@ bash submit-server.sh N
 レプリカ数上限はありません。実際に投入できる数は、ABCIのSpotサービスの
 リソース制限で決まります。
 
-## 4. ログインノードからAPIを利用
+## 4. CPUジョブからAPIを利用
 
-`router_ssh_host`の値を使い、ログインノードからRouterへSSHポート
-フォワーディングします。次のコマンドは実行中のままになるため、この端末を
-開いておきます。終了するときは`Ctrl-C`を押します。
+`router_ssh_host`の値を指定して、リクエスト用のCPUジョブを投入します。
 
 ```bash
-bash forward-router.sh HOST
+bash submit-request.sh HOST ./example-request.sh
 ```
 
-別のログイン端末からサンプルリクエストを送信します。
+このジョブはSpotサービスの`rt_HC`を1ノード使用し、CPUノード内で次の順に
+処理します。
 
-```bash
-bash example-request.sh
-```
+1. CPUノードの`127.0.0.1:31000`からRouterの
+   `127.0.0.1:31000`へSSHポートフォワーディングする。
+2. 第2引数で指定したスクリプトを実行し、通常の`curl`で
+   `/v1/chat/completions`へJSONリクエストを送信する。
+3. リクエストの完了後、またはエラーや`qdel`による終了時にSSHプロセスを
+   停止する。
 
-リクエストはログインノードの次のURLへ送ります。
-
-```text
-http://127.0.0.1:31000/v1/chat/completions
-```
-
-SSHポートフォワーディングがRouterの`127.0.0.1:31000`へ転送するため、
-`curl`やOpenAI互換のHTTPクライアントから同じURLを使用できます。
-`example-request.sh`には通常のJSONリクエスト例を記載しています。
+応答はCPUジョブの標準出力に記録されます。`example-request.sh`は実行例です。
+独自の処理を送る場合は、同じHTTP URLを使用する別のスクリプトを第2引数に
+指定します。
 
 ## 5. トークン上限と性能の確認
 
