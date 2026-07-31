@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# Submit with submit-server.sh; queue, project, node count, resource type, and
+# walltime are supplied by that wrapper.
+#PBS -j oe
+#PBS -k oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
+readonly SCRIPT_DIR="$PBS_O_WORKDIR"
+
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+k3_load_config "${K3_CONFIG:?K3_CONFIG is not set}"
+
+if [[ ${USE_SSH:-} != "1" ]]; then
+    k3_die "server requires USE_SSH=1; found ${USE_SSH:-unset}"
+fi
+k3_require_positive_integer REPLICA_COUNT "${REPLICA_COUNT:-}"
+
+k3_load_server_modules
+
+readonly NODE_WORKER="$SCRIPT_DIR/server-node.sh"
+readonly RUNTIME="$SCRIPT_DIR/runtime.py"
+readonly INSTALL_MARKER="$RUNTIME_ROOT/.k3-install-9cb03516.complete"
+readonly JOB_NUMBER="${PBS_JOBID%%.*}"
+readonly EXPECTED_NODES=$((REPLICA_COUNT * 2))
+readonly JOB_LOG_DIR="$PBS_O_WORKDIR/k3-${REPLICA_COUNT}replicas-$JOB_NUMBER"
+readonly NODE_INFO_DIR="$JOB_LOG_DIR/node-info"
+readonly MANIFEST="$JOB_LOG_DIR/replicas.tsv"
+readonly ROUTER_LOG="$JOB_LOG_DIR/router.log"
+
+for required_path in \
+    "${PBS_NODEFILE:?PBS_NODEFILE is not set}" \
+    "$NODE_WORKER" \
+    "$RUNTIME" \
+    "$INSTALL_MARKER" \
+    "$MODEL_DIR/config.json"
+do
+    [[ -e "$required_path" ]] || k3_die "required path not found: $required_path"
+done
+
+mapfile -t NODE_SLOTS <"$PBS_NODEFILE"
+mapfile -t UNIQUE_NODES < <(sort -u "$PBS_NODEFILE")
+if (( ${#NODE_SLOTS[@]} != EXPECTED_NODES )); then
+    k3_die "PBS_NODEFILE has ${#NODE_SLOTS[@]} slots; expected $EXPECTED_NODES"
+fi
+if (( ${#UNIQUE_NODES[@]} != EXPECTED_NODES )); then
+    k3_die "allocated ${#UNIQUE_NODES[@]} unique nodes; expected $EXPECTED_NODES"
+fi
+if [[ "$(hostname -s)" != "${NODE_SLOTS[0]}" ]]; then
+    k3_die "PBS launcher must be the first node in PBS_NODEFILE"
+fi
+if [[ ! "$JOB_NUMBER" =~ ^[0-9]+$ ]]; then
+    k3_die "could not derive a numeric job number from $PBS_JOBID"
+fi
+if [[ -e "$JOB_LOG_DIR" ]]; then
+    k3_die "job log directory already exists: $JOB_LOG_DIR"
+fi
+mkdir -p "$NODE_INFO_DIR"
+
+export OMPI_MCA_hwloc_base_binding_policy=none
+export PRTE_MCA_hwloc_base_binding_policy=none
+export K3_NODE_INFO_DIR="$NODE_INFO_DIR"
+export EXPECTED_DISCOVERY_RANKS="$EXPECTED_NODES"
+export REPLICA_COUNT
+
+declare -a NODE_IPS=()
+declare -a SERVER_LAUNCH_PIDS=()
+declare -a REPLICA_LOG_DIRS=()
+declare -a LEADER_HOSTS=()
+declare -a LEADER_IPS=()
+declare -a ROUTER_WORKER_URLS=()
+ROUTER_PID=""
+
+cleanup() {
+    local process_id
+    if [[ -n ${ROUTER_PID:-} ]] &&
+       kill -0 "$ROUTER_PID" 2>/dev/null; then
+        kill "$ROUTER_PID" 2>/dev/null || true
+    fi
+    for process_id in "${SERVER_LAUNCH_PIDS[@]}"; do
+        if kill -0 "$process_id" 2>/dev/null; then
+            kill "$process_id" 2>/dev/null || true
+        fi
+    done
+    for process_id in "${SERVER_LAUNCH_PIDS[@]}"; do
+        wait "$process_id" 2>/dev/null || true
+    done
+    if [[ -n ${ROUTER_PID:-} ]]; then
+        wait "$ROUTER_PID" 2>/dev/null || true
+    fi
+}
+
+show_failure_logs() {
+    local log_path
+    local replica_log_dir
+    if [[ -f "$ROUTER_LOG" ]]; then
+        echo "=== Tail: $ROUTER_LOG ===" >&2
+        tail -n 100 "$ROUTER_LOG" >&2
+    fi
+    for replica_log_dir in "${REPLICA_LOG_DIRS[@]}"; do
+        shopt -s nullglob
+        for log_path in "$replica_log_dir"/node-rank-*.log; do
+            echo "=== Tail: $log_path ===" >&2
+            tail -n 80 "$log_path" >&2
+        done
+        shopt -u nullglob
+    done
+}
+
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+
+echo "pbs_jobid=$PBS_JOBID"
+echo "replica_count=$REPLICA_COUNT"
+echo "node_count=$EXPECTED_NODES"
+echo "gpu_count=$((EXPECTED_NODES * 8))"
+echo "launcher_host=$(hostname -s)"
+echo "nodes=${NODE_SLOTS[*]}"
+echo "job_log_dir=$JOB_LOG_DIR"
+echo "recipe=H200_2x8_TP16_EP16_Marlin_FlashMLA"
+mpirun --version
+
+echo "=== Discover node addresses ==="
+mpirun \
+    -np "$EXPECTED_NODES" \
+    -hostfile "$PBS_NODEFILE" \
+    -x K3_CONFIG \
+    -x K3_NODE_INFO_DIR \
+    -x EXPECTED_DISCOVERY_RANKS \
+    bash "$NODE_WORKER" discover
+
+for ((node_index = 0; node_index < EXPECTED_NODES; node_index++)); do
+    info_file="$NODE_INFO_DIR/rank-$node_index.tsv"
+    [[ -f "$info_file" ]] \
+        || k3_die "node discovery result not found: $info_file"
+    IFS=$'\t' read -r discovered_host discovered_ip <"$info_file"
+    if [[ "$discovered_host" != "${NODE_SLOTS[node_index]}" ]]; then
+        k3_die "rank $node_index reports $discovered_host; expected ${NODE_SLOTS[node_index]}"
+    fi
+    if [[ ! "$discovered_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        k3_die "invalid IPv4 address from $discovered_host: $discovered_ip"
+    fi
+    NODE_IPS[node_index]="$discovered_ip"
+done
+
+: >"$MANIFEST"
+for ((replica_index = 0; replica_index < REPLICA_COUNT; replica_index++)); do
+    first_node_index=$((replica_index * 2))
+    second_node_index=$((first_node_index + 1))
+    leader_host="${NODE_SLOTS[first_node_index]}"
+    follower_host="${NODE_SLOTS[second_node_index]}"
+    leader_ip="${NODE_IPS[first_node_index]}"
+    dist_init_addr="$leader_ip:29500"
+    replica_log_dir="$JOB_LOG_DIR/replica-$replica_index"
+    pair_hostfile="$replica_log_dir/hosts"
+
+    mkdir "$replica_log_dir"
+    printf '%s\n%s\n' "$leader_host" "$follower_host" >"$pair_hostfile"
+
+    REPLICA_INDEX="$replica_index" \
+    DIST_INIT_ADDR="$dist_init_addr" \
+    SGLANG_LOG_DIR="$replica_log_dir" \
+    mpirun \
+        -np 2 \
+        -hostfile "$pair_hostfile" \
+        -x K3_CONFIG \
+        -x REPLICA_INDEX \
+        -x REPLICA_COUNT \
+        -x DIST_INIT_ADDR \
+        -x SGLANG_LOG_DIR \
+        bash "$NODE_WORKER" launch &
+
+    launcher_pid=$!
+    SERVER_LAUNCH_PIDS[replica_index]="$launcher_pid"
+    REPLICA_LOG_DIRS[replica_index]="$replica_log_dir"
+    LEADER_HOSTS[replica_index]="$leader_host"
+    LEADER_IPS[replica_index]="$leader_ip"
+    ROUTER_WORKER_URLS[replica_index]="http://$leader_ip:30000"
+
+    printf '%s\t%s\thttp://%s:30000/health\t%s\n' \
+        "$replica_index" \
+        "$leader_host" \
+        "$leader_ip" \
+        "$launcher_pid" >>"$MANIFEST"
+
+    echo "replica=$replica_index nodes=$leader_host,$follower_host"
+    echo "replica_${replica_index}_dist_init_addr=$dist_init_addr"
+    echo "replica_${replica_index}_server_addr=$leader_ip:30000"
+done
+
+if ! python3 -u "$RUNTIME" \
+    wait-replicas \
+    --manifest "$MANIFEST" \
+    --timeout-seconds 5400
+then
+    echo "ERROR: one or more replicas did not become ready" >&2
+    show_failure_logs
+    exit 1
+fi
+
+for ((replica_index = 0; replica_index < REPLICA_COUNT; replica_index++)); do
+    echo "replica_${replica_index}_api_base=http://${LEADER_IPS[replica_index]}:30000/v1"
+    echo "replica_${replica_index}_ssh_host=${LEADER_HOSTS[replica_index]}"
+done
+echo "K3_REPLICA_POOL_READY count=$REPLICA_COUNT"
+
+echo "=== Launch Router ==="
+(
+    export PATH="$RUNTIME_ROOT/venv/bin:$PATH"
+    export PYTHONNOUSERSITE=1
+    export PYTHONUNBUFFERED=1
+    export CUDA_VISIBLE_DEVICES=""
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    unset http_proxy https_proxy all_proxy
+    exec "$RUNTIME_ROOT/venv/bin/python" -m sglang_router.launch_router \
+        --host 0.0.0.0 \
+        --port 31000 \
+        --policy cache_aware \
+        --worker-urls "${ROUTER_WORKER_URLS[@]}"
+) >"$ROUTER_LOG" 2>&1 &
+ROUTER_PID=$!
+
+if ! python3 -u "$RUNTIME" \
+    wait-router \
+    --endpoint "http://127.0.0.1:31000/readiness" \
+    --pid "$ROUTER_PID" \
+    --expected-workers "$REPLICA_COUNT" \
+    --timeout-seconds 300
+then
+    echo "ERROR: Router did not become ready" >&2
+    show_failure_logs
+    exit 1
+fi
+
+echo "router_host=$(hostname -s)"
+echo "router_addr=${NODE_IPS[0]}:31000"
+echo "router_api_base=http://${NODE_IPS[0]}:31000/v1"
+echo "router_ssh_host=$(hostname -s)"
+echo "router_policy=cache_aware"
+echo "K3_ROUTED_REPLICA_POOL_READY count=$REPLICA_COUNT"
+echo "The pool remains active until qdel, a process failure, or PBS walltime."
+
+set +e
+wait -n "${SERVER_LAUNCH_PIDS[@]}" "$ROUTER_PID"
+service_status=$?
+set -e
+
+echo "ERROR: a replica launcher or Router exited; status=$service_status" >&2
+show_failure_logs
+exit 1

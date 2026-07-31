@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Submit with submit-install.sh; queue, project, resource type, and walltime
+# are supplied by that wrapper.
+#PBS -j oe
+#PBS -k oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
+readonly SCRIPT_DIR="$PBS_O_WORKDIR"
+
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+k3_load_config "${K3_CONFIG:?K3_CONFIG is not set}"
+
+k3_load_build_modules
+
+echo "pbs_jobid=${PBS_JOBID:?PBS_JOBID is not set}"
+echo "host=$(hostname -s)"
+echo "workdir=$PBS_O_WORKDIR"
+module list
+
+bash "$SCRIPT_DIR/install-worker.sh"

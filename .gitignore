@@ -1,0 +1,6 @@
+config.env
+results/
+__pycache__/
+k3-*replicas-*/
+*.o[0-9]*
+*.e[0-9]*
