@@ -79,14 +79,6 @@ router_ssh_host=HOST
 router_api_base=http://NODE_IP:31000/v1
 ```
 
-`router_ssh_host`の値を使ってAPIを確認します。
-
-```bash
-bash client.sh smoke HOST
-```
-
-成功時には`K3_ROUTER_API_OK`を表示します。
-
 Nレプリカで起動する場合は次のとおりです。
 
 ```bash
@@ -97,7 +89,33 @@ bash submit-server.sh N
 レプリカ数上限はありません。実際に投入できる数は、ABCIのSpotサービスの
 リソース制限で決まります。
 
-## 4. トークン上限と性能の確認
+## 4. ログインノードからAPIを利用
+
+`router_ssh_host`の値を使い、ログインノードからRouterへSSHポート
+フォワーディングします。次のコマンドは実行中のままになるため、この端末を
+開いておきます。終了するときは`Ctrl-C`を押します。
+
+```bash
+bash forward-router.sh HOST
+```
+
+別のログイン端末からサンプルリクエストを送信します。
+
+```bash
+bash example-request.sh
+```
+
+リクエストはログインノードの次のURLへ送ります。
+
+```text
+http://127.0.0.1:31000/v1/chat/completions
+```
+
+SSHポートフォワーディングがRouterの`127.0.0.1:31000`へ転送するため、
+`curl`やOpenAI互換のHTTPクライアントから同じURLを使用できます。
+`example-request.sh`には通常のJSONリクエスト例を記載しています。
+
+## 5. トークン上限と性能の確認
 
 起動したレプリカ数を指定し、入力トークン数の実効上限を確認します。
 
