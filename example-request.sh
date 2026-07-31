@@ -23,7 +23,7 @@ curl \
   "messages": [
     {
       "role": "user",
-      "content": "Return only the number: 15% of 240."
+      "content": "二次方程式の解の公式を導出して下さい。"
     }
   ],
   "temperature": 0,
