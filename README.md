@@ -1,5 +1,7 @@
 # Kimi K3 Native Runtime Installer for ABCI
 
+Author: Yusuke Oda (@odashi)
+
 ABCIのH200搭載ノード向けに、Kimi K3のためのネイティブランタイムを構築します。
 コンテナ環境は使用せず、指定したディレクトリ以下にSGLangランタイムが構築されます。
 1レプリカは2ノード、H200×16、TP16、EP16で構成します。
