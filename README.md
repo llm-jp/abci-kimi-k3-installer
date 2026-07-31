@@ -1,17 +1,17 @@
-# ABCIでKimi K3を動かす
+# Kimi K3 Native Runtime Installer for ABCI
 
-ABCIのH200搭載ノード向けに、Singularityを使わないSGLang実行環境を構築します。
+ABCIのH200搭載ノード向けに、Kimi K3のためのネイティブランタイムを構築します。
+コンテナ環境は使用せず、指定したディレクトリ以下にSGLangランタイムが構築されます。
 1レプリカは2ノード、H200×16、TP16、EP16で構成します。
-複数レプリカはSGLang Routerで束ね、単一のOpenAI互換エンドポイントとして
-公開します。
+複数レプリカはSGLang Routerで束ね、単一のOpenAI互換エンドポイントとして公開します。
 
-インストールジョブはGitHub、PyPI、PyTorch、Rustup、crates.ioから依存関係を
-取得します。Kimi K3のモデルの重みは取得しません。
+インストールジョブはGitHub、PyPI、PyTorch、Rustup、crates.ioから依存関係を取得します。
+Kimi K3のモデルの重みは取得しません。
 
 ## 前提
 
-全計算ノードから参照できる共有ストレージに、Kimi K3のモデルの重みを
-配置してください。重みは本インストーラに含まれません。
+全計算ノードから参照できる共有ストレージに、Kimi K3のモデルの重みを配置してください。
+重みは本インストーラに含まれません。
 
 次の構成はスクリプト内で固定しています。
 
@@ -41,9 +41,10 @@ MODEL_DIR="/共有パス/MoonshotAI/Kimi-K3"
 RUNTIME_ROOT="/共有パス/Kimi-K3-runtime"
 ```
 
-`MODEL_DIR`には`config.json`、`model.safetensors.index.json`、インデックスが
-参照するすべての重みシャードが必要です。`RUNTIME_ROOT`には実行環境を
-インストールする、まだ存在しない共有ストレージ上のパスを指定します。
+`MODEL_DIR`には`config.json`、`model.safetensors.index.json`、
+インデックスが参照するすべての重みシャードが必要です。
+`RUNTIME_ROOT`には実行環境をインストールする、
+まだ存在しない共有ストレージ上のパスを指定します。
 
 ## 2. インストール
 
@@ -53,8 +54,8 @@ ABCIのログインノードで実行します。
 bash submit-install.sh
 ```
 
-表示されたジョブIDを`qstat`で確認します。成功時には`K3_INSTALL_OK`を
-表示します。`RUNTIME_ROOT`が既に存在する場合は、ジョブを投入せず停止します。
+表示されたジョブIDを`qstat`で確認します。成功時には`K3_INSTALL_OK`を表示します。
+`RUNTIME_ROOT`が既に存在する場合は、ジョブを投入せず停止します。
 
 構築したPythonパッケージの一覧は次のファイルに保存します。
 
@@ -70,8 +71,9 @@ RUNTIME_ROOT/environment.freeze.txt
 bash submit-server.sh 1
 ```
 
-起動時にモデルの重みを読み込み、CUDAグラフを作成するため、完了まで十数分
-かかる場合があります。起動が完了すると次を表示します。
+起動時にモデルの重みを読み込み、CUDAグラフを作成するため、
+完了まで十数分かかる場合があります。
+起動が完了すると次を表示します。
 
 ```text
 K3_ROUTED_REPLICA_POOL_READY count=1
@@ -85,9 +87,9 @@ Nレプリカで起動する場合は次のとおりです。
 bash submit-server.sh N
 ```
 
-必要なリソースは`2 × N`ノード、`16 × N`GPUです。スクリプト独自の
-レプリカ数上限はありません。実際に投入できる数は、ABCIのSpotサービスの
-リソース制限で決まります。
+必要なリソースは`2 × N`ノード、`16 × N`GPUです。
+スクリプト独自のレプリカ数上限はありません。
+実際に投入できる数は、ABCIのSpotサービスのリソース制限で決まります。
 
 ## 4. CPUジョブからAPIを利用
 
@@ -97,19 +99,16 @@ bash submit-server.sh N
 bash submit-request.sh HOST ./example-request.sh
 ```
 
-このジョブはSpotサービスの`rt_HC`を1ノード使用し、CPUノード内で次の順に
-処理します。
+このジョブはSpotサービスの`rt_HC`を1ノード使用し、CPUノード内で次の順に処理します。
 
-1. CPUノードの`127.0.0.1:31000`からRouterの
-   `127.0.0.1:31000`へSSHポートフォワーディングする。
-2. 第2引数で指定したスクリプトを実行し、通常の`curl`で
-   `/v1/chat/completions`へJSONリクエストを送信する。
-3. リクエストの完了後、またはエラーや`qdel`による終了時にSSHプロセスを
-   停止する。
+1. CPUノードの`127.0.0.1:31000`からRouterの`127.0.0.1:31000`へ
+   SSHポートフォワーディングする。
+2. 第2引数で指定したスクリプトを実行し、通常の`curl`で`/v1/chat/completions`へ
+   JSONリクエストを送信する。
+3. リクエストの完了後、またはエラーや`qdel`による終了時にSSHプロセスを停止する。
 
 応答はCPUジョブの標準出力に記録されます。`example-request.sh`は実行例です。
-独自の処理を送る場合は、同じHTTP URLを使用する別のスクリプトを第2引数に
-指定します。
+独自の処理を送る場合は、同じHTTP URLを使用する別のスクリプトを第2引数に指定します。
 
 ## 5. トークン上限と性能の確認
 
@@ -137,13 +136,12 @@ bash client.sh benchmark \
 
 ## 停止とログ
 
-サーバーは、PBSの実行時間上限への到達、プロセスの異常終了、または`qdel`に
-よる停止のいずれかまで稼働します。
+サーバーは、PBSの実行時間上限への到達、プロセスの異常終了、
+または`qdel`による停止のいずれかまで稼働します。
 
 ```bash
 qdel JOB_ID
 ```
 
-サーバーログは、ジョブ投入元ディレクトリの
-`k3-Nreplicas-JOB_NUMBER/`へ保存します。主な確認先は`router.log`と
-`replica-N/node-rank-*.log`です。
+サーバーログは、ジョブ投入元ディレクトリの`k3-Nreplicas-JOB_NUMBER/`へ保存します。
+主な確認先は`router.log`と`replica-N/node-rank-*.log`です。
